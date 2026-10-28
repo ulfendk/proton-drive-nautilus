@@ -1,0 +1,18 @@
+[Unit]
+Description=Proton Drive FUSE mount at ~/ProtonDrive
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+Environment=PYTHONPATH=%h/.local/share/proton-drive-nautilus
+ExecStartPre=-/usr/bin/fusermount3 -uz %h/ProtonDrive
+ExecStart=/usr/bin/python -m pdfs %h/ProtonDrive --cli @CLI@
+ExecStopPost=-/usr/bin/fusermount3 -uz %h/ProtonDrive
+# Leaves time for in-flight uploads to finish (pdfs waits up to 60s).
+TimeoutStopSec=90
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=graphical-session.target

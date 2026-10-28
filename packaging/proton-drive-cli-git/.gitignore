@@ -1,0 +1,4 @@
+src/
+pkg/
+sdk/
+*.pkg.tar.zst

@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "regin.proton-drive",
+  "name": "Proton Drive",
+  "version": "1.0.0",
+  "author": "regin",
+  "license": "MIT",
+  "description": "Status of the ~/ProtonDrive mount: sign-in, mount state and uploads in progress, backed by the proton-drive CLI.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Proton Drive",
+    "description": "Shows whether Proton Drive is mounted and syncing, lists pending uploads, and signs in to the proton-drive CLI.",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
