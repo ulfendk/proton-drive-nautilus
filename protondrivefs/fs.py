@@ -31,8 +31,12 @@ REOPEN_MAX_AGE = 5.0
 
 
 def is_indexer(pid):
+    # FUSE reports the calling thread, and extractors read on worker threads
+    # with names of their own ("pool-0"), so check the process it belongs to.
     try:
-        with open(f"/proc/{pid}/comm") as f:
+        with open(f"/proc/{pid}/status") as f:
+            tgid = next(line.split()[1] for line in f if line.startswith("Tgid:"))
+        with open(f"/proc/{tgid}/comm") as f:
             return f.read().strip().startswith(INDEXERS)
     except OSError:
         return False

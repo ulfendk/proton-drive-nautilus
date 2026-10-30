@@ -290,6 +290,30 @@ def test_refuses_indexers(mount, tmp_path):
     assert read(mount.path("top.bin")) == read(mount.files / "top.bin")
 
 
+INDEXER_THREAD = """
+import ctypes, sys, threading
+def run():
+    # Like localsearch-extractor's "pool-0" threads.
+    ctypes.CDLL(None).prctl(15, b"pool-0")  # PR_SET_NAME
+    try:
+        open(sys.argv[1], "rb").read()
+        print("read")
+    except PermissionError:
+        print("refused")
+thread = threading.Thread(target=run)
+thread.start()
+thread.join()
+"""
+
+
+def test_refuses_indexer_worker_threads(mount, tmp_path):
+    indexer = tmp_path / "localsearch-extractor-3"
+    shutil.copy(os.path.realpath(sys.executable), indexer)
+    result = subprocess.run([indexer, "-c", INDEXER_THREAD, mount.path("top.bin")], capture_output=True, check=True)
+    assert result.stdout == b"refused\n"
+    assert mount.calls("download") == []
+
+
 def test_indexed_by_default(mount):
     assert ".trackerignore" not in os.listdir(mount.path())
 
