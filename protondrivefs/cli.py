@@ -124,8 +124,11 @@ class Worker:
     answering anything, it's assumed to be broken and isn't started again.
     """
 
-    def __init__(self, command):
+    def __init__(self, command, timeout=30.0):
         self.command = command
+        # A request the SDK never finishes would otherwise hang the caller,
+        # and with it whoever is waiting on the mount, for good.
+        self.timeout = timeout
         self.disabled = False
         self._process = None
         self._waiting = {}  # request id -> [trio.Event, reply]
@@ -147,7 +150,15 @@ class Worker:
             except (trio.BrokenResourceError, trio.ClosedResourceError):
                 self._waiting.pop(request_id, None)
                 raise WorkerGone() from None
-        await waiter[0].wait()
+            process = self._process
+        with trio.move_on_after(self.timeout):
+            await waiter[0].wait()
+        if not waiter[0].is_set():
+            log.warning("%s didn't answer %s within %ss; restarting it", self.command[0], argv[:2], self.timeout)
+            self._waiting.pop(request_id, None)
+            if self._process is process:
+                process.kill()
+            raise WorkerGone()
         reply = waiter[1]
         if reply is None:
             raise WorkerGone()
@@ -210,7 +221,7 @@ class Worker:
 
 
 class Cli:
-    def __init__(self, binary="proton-drive", max_concurrent=3, worker=None):
+    def __init__(self, binary="proton-drive", max_concurrent=3, worker=None, worker_timeout=30.0):
         self.binary = binary
         # None until the first call; the bar widget shows a login button when False.
         self.logged_in = None
@@ -219,7 +230,7 @@ class Cli:
         self._limit = trio.Semaphore(max_concurrent)
         # `worker` is a command line; the worker is one process, so this
         # limit only bounds how much work is queued in it.
-        self._worker = Worker(worker) if worker else None
+        self._worker = Worker(worker, worker_timeout) if worker else None
         self._worker_limit = trio.Semaphore(16)
 
     async def _run(self, group, command, *args, options=(), on_progress=None):

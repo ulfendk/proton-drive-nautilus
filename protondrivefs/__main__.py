@@ -28,6 +28,12 @@ def parse_args():
         default="proton-drive-worker",
         help="long-running CLI for listings and other metadata calls; '' to run the CLI for every call",
     )
+    parser.add_argument(
+        "--worker-timeout",
+        type=float,
+        default=30.0,
+        help="seconds to wait for the worker to answer before restarting it",
+    )
     parser.add_argument("--cache-dir", default=os.path.join(cache_home, "proton-drive-nautilus"))
     parser.add_argument("--state-dir", default=os.path.join(runtime_dir, "proton-drive-nautilus"))
     parser.add_argument("--list-ttl", type=float, default=30.0, help="seconds a folder listing is reused")
@@ -88,7 +94,7 @@ def main():
     if args.worker and not worker:
         log.info("%s not found; running the CLI for every call", args.worker)
     drive = Drive(
-        Cli(args.cli, worker=[worker] if worker else None),
+        Cli(args.cli, worker=[worker] if worker else None, worker_timeout=args.worker_timeout),
         args.cache_dir,
         list_ttl=args.list_ttl,
         cache_limit=int(args.cache_limit_gb * 1024**3),

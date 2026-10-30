@@ -129,8 +129,9 @@ Run it again to update.
 
 Everything except transfers goes to `proton-drive-worker` when it's installed.
 Uploads and downloads always run `proton-drive`, because the CLI only reports
-their progress on a terminal. If the worker exits, the mount starts it again
-on the next call; if it can't start or never answers, the mount runs the CLI
+their progress on a terminal. If the worker exits, or leaves a request
+unanswered for 30 s (`--worker-timeout`), the mount starts it again on the
+next call; if it can't start or never answers, the mount runs the CLI
 for every call instead. Start the mount with `--worker ''` to do that from the
 start.
 

@@ -493,3 +493,29 @@ def test_upload_git_repos(tmp_path):
         assert read(mount.files / "project" / "src" / "main.py") == b"print('hi')\n"
     finally:
         mount.stop()
+
+
+def test_restarts_worker_that_stops_answering(tmp_path):
+    mount = Mount(tmp_path, env={"FAKE_WORKER_HANG": "trash"}, args=["--worker-timeout", "1"])
+    try:
+        assert os.listdir(mount.path("Documents")) == ["notes.txt"]
+        # Not retried: the worker may have trashed it before hanging.
+        with pytest.raises(OSError) as error:
+            os.unlink(mount.path("top.bin"))
+        assert error.value.errno == errno.EIO
+        # The mount carries on, with a new worker.
+        assert sorted(os.listdir(mount.path())) == ["Documents", "top.bin"]
+        os.mkdir(mount.path("After"))
+        mount.wait_uploaded()
+        assert (mount.files / "After").is_dir()
+        assert len({call["pid"] for call in mount.worker_calls()}) == 2
+    finally:
+        mount.stop()
+
+
+def test_lists_with_the_cli_when_the_worker_stops_answering(tmp_path):
+    mount = Mount(tmp_path, env={"FAKE_WORKER_HANG": "list"}, args=["--worker-timeout", "1"])
+    try:
+        assert os.listdir(mount.path("Documents")) == ["notes.txt"]
+    finally:
+        mount.stop()

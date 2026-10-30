@@ -5,7 +5,7 @@ Each request runs tests/fake_proton_drive.py, in a thread so requests overlap
 like they do in the real worker. Every request is appended to
 $FAKE_DRIVE_ROOT/worker.log as {"pid", "argv"}. With $FAKE_WORKER_EXIT_AFTER=n
 it exits without replying once it has answered n requests (0: never answers
-anything).
+anything). With $FAKE_WORKER_HANG=command it never replies to that command.
 """
 
 import json
@@ -17,6 +17,7 @@ import threading
 FAKE_CLI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_proton_drive.py")
 ROOT = os.environ["FAKE_DRIVE_ROOT"]
 EXIT_AFTER = os.environ.get("FAKE_WORKER_EXIT_AFTER")
+HANG = os.environ.get("FAKE_WORKER_HANG")
 
 lock = threading.Lock()
 answered = 0
@@ -24,6 +25,8 @@ answered = 0
 
 def handle(request):
     global answered
+    if request["argv"][1] == HANG:
+        return
     proc = subprocess.run([sys.executable, FAKE_CLI, *request["argv"]], capture_output=True, text=True)
     if proc.returncode == 0:
         reply = {"id": request["id"], "ok": True, "stdout": proc.stdout}
