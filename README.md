@@ -27,8 +27,8 @@ Proton's trash.
   inside is kept on your disk instead of being uploaded. It still shows up and
   works in `~/ProtonDrive`, marked with an emblem.
 - **Nautilus integration.** Emblems on files that are still uploading or
-  failed, "Retry Upload" on failed files, and "Upload to Proton Drive" on any
-  local file. `~/ProtonDrive` is bookmarked in the sidebar.
+  failed, "Retry Upload" on failed files, "Move to Proton Drive Trash" on
+  anything in the Drive, and "Upload to Proton Drive" on any local file. `~/ProtonDrive` is bookmarked in the sidebar.
 - **Omarchy bar widget.** A cloud icon shows the state at a glance:
 
   | Icon | Meaning |
@@ -140,9 +140,12 @@ fields the mount relies on, and the worker's protocol.
 
 ### Good to know
 
-- **Nautilus's Trash doesn't work here.** Nautilus can't create a trash folder
-  on the mount, so it asks whether to delete permanently. Saying yes moves the
-  item to Proton's trash, so you can still restore it.
+- **Delete with "Move to Proton Drive Trash".** It moves a folder to
+  Proton's trash in one call, however much is in it. Nautilus's own Delete and
+  Move to Trash go file by file, after first listing every folder inside, which
+  for a big folder can take hours. Each item deleted that way also goes to
+  Proton's trash, so you can still restore it. The menu item isn't offered for
+  anything that's still uploading or kept local.
 - **Closing a file doesn't mean it's uploaded.** Watch the emblem or the bar
   widget. When the service stops, it waits up to 60 s for uploads to finish.
 - **New folders upload once the copy pauses.** A folder and everything in it

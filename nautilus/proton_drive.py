@@ -7,7 +7,7 @@ from gi import require_version
 
 require_version("Nautilus", "4.1")
 
-from gi.repository import GObject, Gio, Nautilus
+from gi.repository import GLib, GObject, Gio, Nautilus
 
 MOUNT = os.environ.get("PROTON_DRIVE_MOUNT", os.path.expanduser("~/ProtonDrive"))
 STATUS_FILE = os.path.join(
@@ -16,6 +16,7 @@ STATUS_FILE = os.path.join(
     "status.json",
 )
 RETRY_XATTR = "user.protondrive.retry"
+TRASH_XATTR = "user.protondrive.trash"
 
 EMBLEMS = {
     "writing": "emblem-synchronizing",
@@ -76,15 +77,32 @@ class ProtonDriveExtension(GObject.GObject, Nautilus.InfoProvider, Nautilus.Menu
         paths = [self._relative_path(file) for file in files]
         if all(path is None for path in paths):
             return self._upload_items(files)
+        items = []
         failed = [path for path in paths if path and self._statuses.get(path, "").startswith("error")]
-        if not failed:
-            return []
-        item = Nautilus.MenuItem(
-            name="ProtonDrive::Retry",
-            label="Retry Upload to Proton Drive",
-        )
-        item.connect("activate", lambda *_: self._retry(failed))
-        return [item]
+        if failed:
+            item = Nautilus.MenuItem(
+                name="ProtonDrive::Retry",
+                label="Retry Upload to Proton Drive",
+            )
+            item.connect("activate", lambda *_: self._retry(failed))
+            items.append(item)
+        if all(path and self._fully_on_drive(path) for path in paths):
+            item = Nautilus.MenuItem(
+                name="ProtonDrive::Trash",
+                label="Move to Proton Drive Trash",
+            )
+            item.connect("activate", lambda *_: self._trash(paths))
+            items.append(item)
+        return items
+
+    def _fully_on_drive(self, path):
+        # Anything still uploading or kept local would be lost, so the mount refuses.
+        for other, state in self._statuses.items():
+            if other == path or other.startswith(path + "/"):
+                return False
+            if state == "local" and path.startswith(other + "/"):
+                return False
+        return True
 
     def _upload_items(self, files):
         local = [file.get_location().get_path() for file in files if file.get_location()]
@@ -104,6 +122,21 @@ class ProtonDriveExtension(GObject.GObject, Nautilus.InfoProvider, Nautilus.Menu
                     os.setxattr(os.path.join(MOUNT, path), RETRY_XATTR, b"1")
                 except OSError:
                     pass
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _trash(self, paths):
+        # One call per selected item, however much is inside it; deleting
+        # through the mount would go file by file.
+        def run():
+            failed = []
+            for path in paths:
+                try:
+                    os.setxattr(os.path.join(MOUNT, path), TRASH_XATTR, b"1")
+                except OSError as error:
+                    failed.append(f"{os.path.basename(path)}: {error.strerror}")
+            if failed:
+                GLib.idle_add(self._notify, "Couldn't move to Proton Drive trash", "\n".join(failed))
 
         threading.Thread(target=run, daemon=True).start()
 

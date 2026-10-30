@@ -519,3 +519,41 @@ def test_lists_with_the_cli_when_the_worker_stops_answering(tmp_path):
         assert os.listdir(mount.path("Documents")) == ["notes.txt"]
     finally:
         mount.stop()
+
+
+def test_trash_folder_in_one_call(mount):
+    os.listdir(mount.path("Documents"))
+    os.setxattr(mount.path("Documents"), "user.protondrive.trash", b"1")
+    assert not (mount.files / "Documents").exists()
+    assert os.listdir(mount.path()) == ["top.bin"]
+    assert len(mount.calls("trash")) == 1
+    with pytest.raises(FileNotFoundError):
+        os.stat(mount.path("Documents", "notes.txt"))
+
+
+def test_trash_refuses_what_isnt_on_the_drive(mount):
+    write(mount.path("Documents", "pending.txt"), b"x")
+    copy_repository(mount.path("project"))
+    for path in (mount.path("project"), mount.path("project", "src")):
+        with pytest.raises(OSError) as error:
+            os.setxattr(path, "user.protondrive.trash", b"1")
+        assert error.value.errno == errno.EBUSY
+    mount.wait_uploaded()
+    os.setxattr(mount.path("Documents"), "user.protondrive.trash", b"1")
+    assert sorted(os.listdir(mount.path())) == ["project", "top.bin"]
+
+
+@pytest.mark.skipif(not shutil.which("inotifywait"), reason="needs inotify-tools")
+def test_trash_tells_file_managers(mount):
+    os.listdir(mount.path())
+    # The kernel reports the delete notification as ATTRIB; GIO then
+    # re-reads the entry, finds it gone and Nautilus drops it.
+    watcher = subprocess.Popen(
+        ["inotifywait", "-q", "-e", "attrib", "--format", "%e %f", mount.path()],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    time.sleep(0.5)
+    os.setxattr(mount.path("Documents"), "user.protondrive.trash", b"1")
+    out, _ = watcher.communicate(timeout=10)
+    assert out == b"ATTRIB,ISDIR Documents\n"

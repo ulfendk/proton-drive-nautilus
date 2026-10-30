@@ -18,6 +18,7 @@ log = logging.getLogger(__name__)
 STATUS_XATTR = b"user.protondrive.status"
 RETRY_XATTR = b"user.protondrive.retry"
 CLEAR_CACHE_XATTR = b"user.protondrive.clear-cache"
+TRASH_XATTR = b"user.protondrive.trash"
 # Desktop indexers read every file they find to sniff its type and extract
 # its text, which here means downloading the whole Drive. Their content reads
 # are refused: they still index names and metadata from the listings, and GIO
@@ -198,6 +199,13 @@ class ProtonDriveFS(pyfuse3.Operations):
             path = self._path(inode)
             self.drive.mark_stale(path)
             self.drive.retry(path)
+            return
+        if name == TRASH_XATTR:
+            path = self._path(inode)
+            await self.drive.trash(path)
+            # A delete notification, so file managers drop it from view.
+            parent, child = posixpath.split(path)
+            pyfuse3.invalidate_entry_async(self._inode(parent), os.fsencode(child), deleted=inode, ignore_enoent=True)
             return
         raise pyfuse3.FUSEError(errno.ENOTSUP)
 

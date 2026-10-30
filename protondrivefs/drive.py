@@ -638,6 +638,27 @@ class Drive:
         self._update_cached(path, None)
         self.invalidate(path)
 
+    async def trash(self, path):
+        """Moves `path`, and everything in it, to Proton's trash in one call.
+
+        Deleting through the mount goes file by file, which for a big folder
+        means thousands of calls. Refused when anything inside isn't on the
+        server, since Proton's trash couldn't give that back.
+        """
+        self._refuse_virtual(path)
+        if path == "":
+            raise CliError("can't trash the whole Drive", errno.EPERM)
+        if (
+            self._local_path(path) is not None
+            or any(is_within(root, path) for root in self._local_roots)
+            or any(is_within(pending, path) for pending in self._pending)
+        ):
+            raise CliError(f"{path} holds files that aren't on Proton Drive", errno.EBUSY)
+        await self.stat(path)
+        await self.cli.trash(remote(path))
+        self._update_cached(path, None)
+        self.invalidate(path)
+
     async def rename(self, old, new, overwrite=True):
         self._refuse_virtual(old, new)
         old_local, new_local = self._local_path(old), self._local_path(new)
