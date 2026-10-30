@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stand-in for the proton-drive CLI, backed by a local directory.
 
-Implements the `filesystem` commands pdfs uses, with the same argument shape
+Implements the `filesystem` commands protondrivefs uses, with the same argument shape
 (`<group> <command> --json [options] -- args...`) and NodeEntity-shaped JSON.
 $FAKE_DRIVE_ROOT holds `my-files/` and `trash/`; every call is appended to
 $FAKE_DRIVE_ROOT/calls.log. Like the real CLI, transfers draw progress

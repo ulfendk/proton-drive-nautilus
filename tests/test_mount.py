@@ -1,4 +1,4 @@
-"""Mounts pdfs for real, backed by tests/fake_proton_drive.py."""
+"""Mounts protondrivefs for real, backed by tests/fake_proton_drive.py."""
 
 import errno
 import json
@@ -60,7 +60,7 @@ class Mount:
             [
                 sys.executable,
                 "-m",
-                "pdfs",
+                "protondrivefs",
                 str(self.mountpoint),
                 "--cli",
                 FAKE_CLI,

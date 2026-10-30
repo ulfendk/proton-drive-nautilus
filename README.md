@@ -177,12 +177,12 @@ To run the mount in the foreground against your own Drive:
 
 ```bash
 systemctl --user stop proton-drive-fs
-.venv/bin/python -m pdfs ~/ProtonDrive --debug
+.venv/bin/python -m protondrivefs ~/ProtonDrive --debug
 ```
 
 | Path | What's there |
 |---|---|
-| `pdfs/` | the FUSE filesystem: `cli.py` runs the CLI, `drive.py` caches and uploads, `fs.py` is the FUSE layer |
+| `protondrivefs/` | the FUSE filesystem: `cli.py` runs the CLI, `drive.py` caches and uploads, `fs.py` is the FUSE layer |
 | `nautilus/` | the Nautilus extension |
 | `omarchy/regin.proton-drive/` | the Omarchy bar widget |
 | `systemd/` | the user service |

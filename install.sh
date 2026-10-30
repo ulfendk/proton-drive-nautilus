@@ -16,8 +16,8 @@ fi
 
 share="$HOME/.local/share/proton-drive-nautilus"
 mkdir -p "$share" "$HOME/.local/share/nautilus-python/extensions" "$HOME/.config/systemd/user" "$HOME/ProtonDrive"
-rm -rf "$share/pdfs"
-cp -r pdfs "$share/pdfs"
+rm -rf "$share/pdfs" "$share/protondrivefs"
+cp -r protondrivefs "$share/protondrivefs"
 cp nautilus/proton_drive.py "$HOME/.local/share/nautilus-python/extensions/proton_drive.py"
 sed "s|@CLI@|$cli|" systemd/proton-drive-fs.service > "$HOME/.config/systemd/user/proton-drive-fs.service"
 

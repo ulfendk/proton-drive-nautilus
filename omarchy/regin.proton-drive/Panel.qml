@@ -4,7 +4,7 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
-// Proton Drive: status of the pdfs FUSE mount (proton-drive-nautilus). The
+// Proton Drive: status of the protondrivefs FUSE mount (proton-drive-nautilus). The
 // daemon writes $XDG_RUNTIME_DIR/proton-drive-nautilus/status.json with its
 // pending uploads and whether the CLI's last call was authenticated; this
 // widget watches that file, polls the systemd unit and mount point, and runs

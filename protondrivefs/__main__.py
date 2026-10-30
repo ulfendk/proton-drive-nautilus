@@ -1,4 +1,4 @@
-"""Mounts Proton Drive: python -m pdfs ~/ProtonDrive"""
+"""Mounts Proton Drive: python -m protondrivefs ~/ProtonDrive"""
 
 import argparse
 import logging
@@ -12,13 +12,13 @@ from .cli import Cli
 from .drive import Drive
 from .fs import ProtonDriveFS
 
-log = logging.getLogger("pdfs")
+log = logging.getLogger("protondrivefs")
 
 
 def parse_args():
     cache_home = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-    parser = argparse.ArgumentParser(prog="pdfs", description=__doc__)
+    parser = argparse.ArgumentParser(prog="protondrivefs", description=__doc__)
     parser.add_argument("mountpoint", nargs="?", default=os.path.expanduser("~/ProtonDrive"))
     parser.add_argument("--cli", default="proton-drive", help="proton-drive executable")
     parser.add_argument("--cache-dir", default=os.path.join(cache_home, "proton-drive-nautilus"))

@@ -7,9 +7,9 @@ PartOf=graphical-session.target
 Type=simple
 Environment=PYTHONPATH=%h/.local/share/proton-drive-nautilus
 ExecStartPre=-/usr/bin/fusermount3 -uz %h/ProtonDrive
-ExecStart=/usr/bin/python -m pdfs %h/ProtonDrive --cli @CLI@
+ExecStart=/usr/bin/python -m protondrivefs %h/ProtonDrive --cli @CLI@
 ExecStopPost=-/usr/bin/fusermount3 -uz %h/ProtonDrive
-# Leaves time for in-flight uploads to finish (pdfs waits up to 60s).
+# Leaves time for in-flight uploads to finish (protondrivefs waits up to 60s).
 TimeoutStopSec=90
 Restart=on-failure
 RestartSec=10

@@ -2,7 +2,7 @@ import errno
 import json
 import os
 
-from pdfs.cli import errno_for, parse_node
+from protondrivefs.cli import errno_for, parse_node
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
 
