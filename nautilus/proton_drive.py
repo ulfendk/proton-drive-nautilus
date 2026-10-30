@@ -22,6 +22,7 @@ EMBLEMS = {
     "queued": "emblem-synchronizing",
     "uploading": "emblem-synchronizing",
     "error": "emblem-important",
+    "local": "emblem-unreadable",  # a git repository kept out of the Drive
 }
 
 

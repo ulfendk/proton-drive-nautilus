@@ -31,6 +31,12 @@ ROOT_NODE = Node(uid=None, name="", is_dir=True, size=0, mtime=0.0, ctime=0.0)
 TRACKER_IGNORE = ".trackerignore"
 TRACKER_IGNORE_NODE = Node(uid=None, name=TRACKER_IGNORE, is_dir=False, size=0, mtime=0.0, ctime=0.0)
 
+# A folder that gets a .git while it isn't on the server yet is a git
+# repository being copied in. It's kept in the local store instead, and served
+# from there; a .git added to a folder that's already on the server stays
+# local by itself.
+GIT_DIR = ".git"
+
 
 def remote(path):
     return f"{REMOTE_ROOT}/{path}" if path else REMOTE_ROOT
@@ -47,25 +53,44 @@ def is_within(path, ancestor):
 
 @dataclass
 class Pending:
-    """A file whose newest content only exists locally, in `staging`."""
+    """A file whose newest content only exists locally, in `staging`, or a
+    folder (`is_dir`, no staging) that isn't on the server yet."""
 
-    staging: str
+    staging: str | None
     state: str = "writing"  # writing -> queued -> uploading -> (gone) | error
     writers: int = 0
     dirty: bool = False
     error: str | None = None
+    is_dir: bool = False
+    created: float = field(default_factory=time.time)
     done: trio.Event = field(default_factory=trio.Event)
 
 
 class Drive:
     def __init__(
-        self, cli, cache_dir, list_ttl=30.0, cache_limit=5 * 1024**3, status_file=None, hide_from_indexers=False
+        self,
+        cli,
+        cache_dir,
+        list_ttl=30.0,
+        cache_limit=5 * 1024**3,
+        status_file=None,
+        hide_from_indexers=False,
+        local_dir=None,
+        keep_git_repos_local=True,
+        quiet_seconds=3.0,
     ):
         self.cli = cli
         self.hide_from_indexers = hide_from_indexers
         self.list_ttl = list_ttl
         self.cache_limit = cache_limit
         self.status_file = status_file
+        self.keep_git_repos_local = keep_git_repos_local
+        self.quiet_seconds = quiet_seconds
+        # Git repositories live here, at their path in the mount, and never
+        # upload. Unlike staging it's kept across restarts.
+        self._local_dir = local_dir or os.path.join(cache_dir, "local")
+        self._roots_file = os.path.join(self._local_dir, "roots.json")
+        self._load_roots()
         self._content_dir = os.path.join(cache_dir, "content")
         self._staging_dir = os.path.join(cache_dir, "staging")
         # Staged files from a previous run may be partial writes; never upload them.
@@ -86,8 +111,10 @@ class Drive:
         self._transfers = {}  # id -> {"path", "direction", "done", "total"}
         self._next_transfer = 0
         self._locks = {}  # key -> trio.Lock, so concurrent requests share one CLI call
-        self._pending = {}  # file path -> Pending
+        self._pending = {}  # path -> Pending
+        self._last_new_change = float("-inf")  # trio time of the last change inside a new folder
         self._send_upload, self._receive_upload = trio.open_memory_channel(1000)
+        self._upload_slots = None
         cli.on_login_change = self._write_status
         self._write_status()
         self._evict()
@@ -102,15 +129,25 @@ class Drive:
     # refreshed in the background; the next look (F5 in Nautilus) sees it.
 
     async def listdir(self, path, max_age=None):
-        cached = self._listings.get(path)
-        if cached is None:
-            await self.refresh(path)
-            cached = self._listings[path]
-        elif time.time() - cached[0] > (self.list_ttl if max_age is None else max_age):
-            self._refresh_soon(path)
-        entries = dict(cached[1])
-        if path == "" and self.hide_from_indexers:
-            entries.setdefault(TRACKER_IGNORE, TRACKER_IGNORE_NODE)
+        local = self._local_path(path)
+        if local is not None:
+            entries = {entry.name: self._local_node(entry.path) for entry in os.scandir(local)}
+        elif self._is_new_dir(path):
+            entries = {}
+        else:
+            cached = self._listings.get(path)
+            if cached is None:
+                await self.refresh(path)
+                cached = self._listings[path]
+            elif time.time() - cached[0] > (self.list_ttl if max_age is None else max_age):
+                self._refresh_soon(path)
+            entries = dict(cached[1])
+            if path == "" and self.hide_from_indexers:
+                entries.setdefault(TRACKER_IGNORE, TRACKER_IGNORE_NODE)
+            for root in self._local_roots:
+                parent, name = split(root)
+                if parent == path and os.path.isdir(self._store(root)):
+                    entries[name] = self._local_node(self._store(root))
         for pending_path, pending in self._pending.items():
             parent, name = split(pending_path)
             if parent == path:
@@ -118,6 +155,8 @@ class Drive:
         return entries
 
     def _pending_node(self, name, pending, existing):
+        if pending.is_dir:
+            return Node(uid=None, name=name, is_dir=True, size=0, mtime=pending.created, ctime=pending.created)
         st = os.stat(pending.staging)
         return Node(
             uid=existing.uid if existing else None,
@@ -210,10 +249,10 @@ class Drive:
 
     async def run(self, upload_workers=2):
         """Background work: uploads, listing refreshes and saving listings."""
+        self._upload_slots = trio.Semaphore(upload_workers)
         async with trio.open_nursery() as nursery:
             self._nursery = nursery
-            for _ in range(upload_workers):
-                nursery.start_soon(self._upload_worker)
+            nursery.start_soon(self._dispatch_uploads)
             while True:
                 await trio.sleep(10)
                 self.save_listings()
@@ -223,8 +262,15 @@ class Drive:
     async def fetch(self, path):
         """Returns a local file holding the current content of `path`."""
         pending = self._pending.get(path)
+        if pending and pending.is_dir:
+            raise CliError(f"is a directory: {path}", errno.EISDIR)
         if pending:
             return pending.staging
+        local = self._local_path(path)
+        if local is not None:
+            if os.path.isdir(local):
+                raise CliError(f"is a directory: {path}", errno.EISDIR)
+            return local
         if self._is_virtual(path):
             return self._empty_file
 
@@ -298,7 +344,19 @@ class Drive:
     async def begin_write(self, path, truncate, create=False):
         """Returns a staging file to write `path` into. Pair with end_write()."""
         self._refuse_virtual(path)
+        if create:
+            self._keep_repository_local(path)
+            self._note_change(path)
         pending = self._pending.get(path)
+        if pending and pending.is_dir:
+            raise CliError(f"is a directory: {path}", errno.EISDIR)
+        local = self._local_path(path)
+        if local is not None and pending is None:
+            if create or truncate:
+                open(local, "wb").close()
+            elif not os.path.isfile(local):
+                raise CliError(f"not found: {path}", errno.ENOENT)
+            return local
         if pending and pending.state != "writing":
             await self.settle(path)
             pending = None
@@ -327,7 +385,10 @@ class Drive:
         return pending.staging
 
     def mark_dirty(self, path):
-        self._pending[path].dirty = True
+        pending = self._pending.get(path)
+        if pending:  # Files kept local are written in place.
+            pending.dirty = True
+            self._note_change(path)
 
     def end_write(self, path):
         pending = self._pending.get(path)
@@ -335,6 +396,12 @@ class Drive:
             return
         pending.writers -= 1
         if pending.writers > 0:
+            return
+        local = self._local_path(path)
+        if local is not None:
+            # Was open when its repository was moved to the local store.
+            shutil.move(pending.staging, local)
+            self._drop_pending(path)
             return
         if not pending.dirty:
             self._drop_pending(path)
@@ -345,7 +412,8 @@ class Drive:
 
     def _drop_pending(self, path):
         pending = self._pending.pop(path)
-        shutil.rmtree(os.path.dirname(pending.staging), ignore_errors=True)
+        if pending.staging:
+            shutil.rmtree(os.path.dirname(pending.staging), ignore_errors=True)
         pending.done.set()
         self._write_status()
 
@@ -355,26 +423,55 @@ class Drive:
         if pending and pending.state != "error":
             await pending.done.wait()
 
-    async def _upload_worker(self):
-        async for path in self._receive_upload.clone():
-            pending = self._pending.get(path)
-            if pending is None or pending.state != "queued":
-                continue
+    async def _dispatch_uploads(self):
+        async for path in self._receive_upload:
+            self._nursery.start_soon(self._upload, path)
+
+    async def _upload(self, path):
+        pending = self._pending.get(path)
+        if pending is None or pending.state != "queued":
+            return
+        parent, name = split(path)
+        if pending.is_dir or self._in_new_folder(path):
+            # A copy creates a folder before what's in it, and a repository's
+            # .git can come last. Nothing in a new folder is sent until the
+            # copy has paused, so the whole repository can still be kept local.
+            await self._wait_quiet()
+            while (folder := self._pending.get(parent)) is not None and folder.state != "error":
+                await folder.done.wait()
+            if self._pending.get(path) is not pending:
+                return  # Moved, deleted or kept local meanwhile.
+            if folder is not None:
+                self._fail(pending, f"folder {parent} couldn't be created")
+                return
+        async with self._upload_slots:
+            if self._pending.get(path) is not pending or pending.state != "queued":
+                return
             pending.state = "uploading"
             self._write_status()
             try:
-                size = os.path.getsize(pending.staging)
-                with self._transfer(path, "up", size) as progress:
-                    await self.cli.upload(pending.staging, remote(split(path)[0]), on_progress=progress)
+                if pending.is_dir:
+                    node = await self.cli.create_folder(remote(parent), name)
+                else:
+                    size = os.path.getsize(pending.staging)
+                    with self._transfer(path, "up", size) as progress:
+                        await self.cli.upload(pending.staging, remote(parent), on_progress=progress)
+                    # Shown from the staged copy until the refresh brings the real node.
+                    node = self._pending_node(name, pending, None)
             except CliError as error:
-                pending.state = "error"
-                pending.error = str(error)
-                self._write_status()
-                continue
-            # Shown from the staged copy until the refresh brings the real node.
-            self._update_cached(path, self._pending_node(split(path)[1], pending, None))
-            self._drop_pending(path)
-            self.mark_stale(split(path)[0])
+                self._fail(pending, str(error))
+                return
+        self._update_cached(path, node)
+        if pending.is_dir:
+            self._listings.setdefault(path, (time.time(), {}))
+        self._drop_pending(path)
+        self.mark_stale(parent)
+
+    def _fail(self, pending, message):
+        pending.state = "error"
+        pending.error = message
+        pending.done.set()
+        self._write_status()
 
     def retry(self, path):
         """Re-queues failed uploads at or below `path`."""
@@ -382,12 +479,106 @@ class Drive:
             if pending.state == "error" and is_within(pending_path, path):
                 pending.state = "queued"
                 pending.error = None
+                pending.done = trio.Event()
                 self._send_upload.send_nowait(pending_path)
         self._write_status()
 
     async def drain(self):
         for path in list(self._pending):
             await self.settle(path)
+
+    # New folders and git repositories
+
+    def _is_new_dir(self, path):
+        pending = self._pending.get(path)
+        return pending is not None and pending.is_dir
+
+    def _in_new_folder(self, path):
+        while path:
+            path = split(path)[0]
+            if self._is_new_dir(path):
+                return True
+        return False
+
+    def _note_change(self, path):
+        if self._is_new_dir(path) or self._in_new_folder(path):
+            self._last_new_change = trio.current_time()
+
+    async def _wait_quiet(self):
+        while (left := self._last_new_change + self.quiet_seconds - trio.current_time()) > 0:
+            await trio.sleep(left)
+
+    def _store(self, path):
+        return os.path.join(self._local_dir, "files", path)
+
+    def _local_path(self, path):
+        """Where `path` lives if it's in a repository kept local, else None."""
+        if any(is_within(path, root) for root in self._local_roots):
+            return self._store(path)
+        return None
+
+    def _local_node(self, local):
+        st = os.stat(local)
+        return Node(
+            uid=None,
+            name=os.path.basename(local),
+            is_dir=os.path.isdir(local),
+            size=st.st_size,
+            mtime=st.st_mtime,
+            ctime=st.st_ctime,
+        )
+
+    def _keep_repository_local(self, path):
+        """Called before `path` is created: when it's a .git, keeps its repository local."""
+        parent, name = split(path)
+        if name != GIT_DIR or not self.keep_git_repos_local or self._local_path(path) is not None:
+            return
+        folder = self._pending.get(parent)
+        if folder is None or not folder.is_dir or folder.state not in ("queued", "error"):
+            # The folder is on the server, with its files; only .git stays here.
+            root = path
+            os.makedirs(os.path.dirname(self._store(root)), exist_ok=True)
+        else:
+            root = parent
+            log.info("keeping git repository %s out of the Drive", root)
+            for pending_path in sorted(p for p in self._pending if is_within(p, root)):
+                pending = self._pending[pending_path]
+                local = self._store(pending_path)
+                if pending.is_dir:
+                    os.makedirs(local, exist_ok=True)
+                    self._drop_pending(pending_path)
+                elif pending.writers == 0:
+                    # Open files follow in end_write().
+                    os.makedirs(os.path.dirname(local), exist_ok=True)
+                    shutil.move(pending.staging, local)
+                    self._drop_pending(pending_path)
+        self._local_roots = {r for r in self._local_roots if not is_within(r, root)} | {root}
+        self._save_roots()
+        self._write_status()
+
+    def _load_roots(self):
+        try:
+            with open(self._roots_file) as f:
+                self._local_roots = {root for root in json.load(f) if os.path.lexists(self._store(root))}
+        except (OSError, ValueError, TypeError):
+            self._local_roots = set()
+
+    def _save_roots(self):
+        os.makedirs(self._local_dir, exist_ok=True)
+        tmp = f"{self._roots_file}.tmp"
+        with open(tmp, "w") as f:
+            json.dump(sorted(self._local_roots), f)
+        os.replace(tmp, self._roots_file)
+
+    def _prune_store(self, local_dir):
+        """Removes folders left empty in the store above a removed or moved repository."""
+        top = self._store("").rstrip("/")
+        while local_dir.startswith(top + "/"):
+            try:
+                os.rmdir(local_dir)
+            except OSError:
+                return
+            local_dir = os.path.dirname(local_dir)
 
     # Tree changes
 
@@ -399,21 +590,43 @@ class Drive:
             raise CliError("trash folders are not supported", errno.EPERM)
         if name in await self.listdir(parent):
             raise CliError(f"exists: {path}", errno.EEXIST)
-        node = await self.cli.create_folder(remote(parent), name)
-        self._update_cached(path, node)
-        return node
+        self._keep_repository_local(path)
+        local = self._local_path(path)
+        if local is not None:
+            os.mkdir(local)
+            return self._local_node(local)
+        # Created on the server by an upload task, once whatever is copying
+        # into it has paused.
+        pending = Pending(staging=None, state="queued", dirty=True, is_dir=True)
+        self._pending[path] = pending
+        self._note_change(path)
+        self._write_status()
+        self._send_upload.send_nowait(path)
+        return self._pending_node(name, pending, None)
 
     async def remove(self, path, is_dir):
         self._refuse_virtual(path)
         node = await self.stat(path)
         if node.is_dir != is_dir:
             raise CliError(path, errno.EISDIR if node.is_dir else errno.ENOTDIR)
-        if is_dir:
+        local = self._local_path(path)
+        if is_dir and local is None and not self._is_new_dir(path):
             await self.refresh(path)
         if is_dir and await self.listdir(path):
             raise CliError(f"not empty: {path}", errno.ENOTEMPTY)
 
         pending = self._pending.get(path)
+        if local is not None:
+            if pending:
+                self._drop_pending(path)
+            if os.path.lexists(local):
+                os.rmdir(local) if is_dir else os.unlink(local)
+            if path in self._local_roots:
+                self._local_roots.discard(path)
+                self._save_roots()
+                self._prune_store(os.path.dirname(local))
+            self._write_status()
+            return
         if pending:
             if pending.state == "uploading":
                 await pending.done.wait()
@@ -427,12 +640,19 @@ class Drive:
 
     async def rename(self, old, new, overwrite=True):
         self._refuse_virtual(old, new)
+        old_local, new_local = self._local_path(old), self._local_path(new)
+        moves_root = old in self._local_roots
+        if (old_local is None) != (new_local is None) and not (moves_root and new_local is None):
+            # In or out of a repository kept local; mv and Nautilus copy instead.
+            raise CliError(f"{old} -> {new} crosses the local store", errno.EXDEV)
         pending = self._pending.get(old)
         if pending and pending.state == "uploading":
             await pending.done.wait()
         source = await self.stat(old)
         old_parent, old_name = split(old)
         new_parent, new_name = split(new)
+        self._note_change(old)
+        self._note_change(new)
 
         existing = (await self.listdir(new_parent)).get(new_name)
         if existing:
@@ -442,8 +662,26 @@ class Drive:
                 raise CliError(new, errno.EISDIR if existing.is_dir else errno.ENOTDIR)
             await self.remove(new, existing.is_dir)
 
+        if old_local is not None:
+            target = self._store(new)
+            if os.path.lexists(old_local):
+                if moves_root:
+                    os.makedirs(os.path.dirname(target), exist_ok=True)
+                os.rename(old_local, target)
+            if moves_root:
+                self._local_roots.discard(old)
+                if new_local is None:
+                    self._local_roots.add(new)
+                self._save_roots()
+                self._prune_store(os.path.dirname(old_local))
+            self._move_pending(old, new)
+            return
+
         remote_source = self._listings.get(old_parent, (0, {}))[1].get(old_name)
         if remote_source:
+            if self._is_new_dir(new_parent):
+                # The CLI can't move into a folder that isn't on the server yet.
+                raise CliError(f"{new_parent} isn't on the server yet", errno.EXDEV)
             current = old
             if old_parent != new_parent:
                 await self.cli.move(remote(old), remote(new_parent))
@@ -453,23 +691,36 @@ class Drive:
             self._update_cached(old, None)
             self._update_cached(new, replace(remote_source, name=new_name))
 
+        self._move_pending(old, new)
+
+        # Cached listings and repositories kept local in a moved folder's
+        # subtree move with it.
+        for listed in [p for p in self._listings if is_within(p, old)]:
+            self._listings[new + listed[len(old) :]] = self._listings.pop(listed)
+        roots = [root for root in self._local_roots if is_within(root, old)]
+        for root in roots:
+            moved = new + root[len(old) :]
+            os.renames(self._store(root), self._store(moved))
+            self._local_roots.discard(root)
+            self._local_roots.add(moved)
+        if roots:
+            self._save_roots()
+        self.mark_stale(new_parent)
+
+    def _move_pending(self, old, new):
         for pending_path in [p for p in self._pending if is_within(p, old)]:
             # Local-only content follows the file. The CLI uploads under the
             # staging file's own name, so that must change too.
             pending = self._pending.pop(pending_path)
             moved = new + pending_path[len(old) :]
-            staging = os.path.join(os.path.dirname(pending.staging), split(moved)[1])
-            os.rename(pending.staging, staging)
-            pending.staging = staging
+            if pending.staging:
+                staging = os.path.join(os.path.dirname(pending.staging), split(moved)[1])
+                os.rename(pending.staging, staging)
+                pending.staging = staging
             self._pending[moved] = pending
             if pending.state == "queued":
                 self._send_upload.send_nowait(moved)
         self._write_status()
-
-        # Cached listings of a moved folder's subtree move with it.
-        for listed in [p for p in self._listings if is_within(p, old)]:
-            self._listings[new + listed[len(old) :]] = self._listings.pop(listed)
-        self.mark_stale(new_parent)
 
     # Status for the Nautilus extension and the bar widget
 
@@ -494,6 +745,8 @@ class Drive:
             self._write_status()
 
     def status(self, path):
+        if self._local_path(path) is not None:
+            return "local"
         pending = self._pending.get(path)
         if pending is None:
             return "synced"
@@ -504,7 +757,8 @@ class Drive:
     def _write_status(self):
         if not self.status_file:
             return
-        statuses = {path: self.status(path) for path in self._pending}
+        # Only a repository's top folder is listed, not everything in it.
+        statuses = {path: self.status(path) for path in [*self._pending, *self._local_roots]}
         tmp = f"{self.status_file}.tmp"
         with open(tmp, "w") as f:
             json.dump(

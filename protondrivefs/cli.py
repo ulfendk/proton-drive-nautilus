@@ -1,8 +1,13 @@
 """Async wrapper around the official `proton-drive` CLI.
 
-This is the only module that runs the CLI. Every call is a one-shot process
-with `--json`; results are parsed into `Node` values and failures are raised
-as `CliError` carrying the errno the filesystem should report.
+This is the only module that runs the CLI. Calls use `--json`; results are
+parsed into `Node` values and failures are raised as `CliError` carrying the
+errno the filesystem should report.
+
+Metadata calls go to `proton-drive-worker` when it's installed: the same CLI
+commands, served by one long-running process that keeps its SDK session, so
+a listing takes a fraction of a second instead of several. Transfers, and
+every call when there's no worker, run as one-shot `proton-drive` processes.
 """
 
 import errno
@@ -108,14 +113,114 @@ def _check_results(stdout, action):
             raise CliError(f"{action} failed for {result.get('uid')}")
 
 
+class WorkerGone(Exception):
+    """The worker exited before replying; the call can be made another way."""
+
+
+class Worker:
+    """Client for proton-drive-worker, which answers JSON lines by id.
+
+    Started on the first call and again after it exits. If it exits before
+    answering anything, it's assumed to be broken and isn't started again.
+    """
+
+    def __init__(self, command):
+        self.command = command
+        self.disabled = False
+        self._process = None
+        self._waiting = {}  # request id -> [trio.Event, reply]
+        self._next_id = 0
+        self._answered = False
+        self._lock = trio.Lock()
+
+    async def call(self, argv):
+        """Returns the command's stdout, or raises CliError with its message."""
+        async with self._lock:
+            if self._process is None:
+                await self._start()
+            self._next_id += 1
+            request_id = self._next_id
+            waiter = self._waiting[request_id] = [trio.Event(), None]
+            line = json.dumps({"id": request_id, "argv": argv}) + "\n"
+            try:
+                await self._process.stdin.send_all(line.encode())
+            except (trio.BrokenResourceError, trio.ClosedResourceError):
+                self._waiting.pop(request_id, None)
+                raise WorkerGone() from None
+        await waiter[0].wait()
+        reply = waiter[1]
+        if reply is None:
+            raise WorkerGone()
+        if not reply.get("ok"):
+            message = reply.get("error") or "worker error"
+            raise CliError(message, errno_for(message))
+        return reply.get("stdout", "")
+
+    async def _start(self):
+        process = await trio.lowlevel.open_process(self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        self._process = process
+        self._answered = False
+        log.info("started %s (pid %s)", self.command[0], process.pid)
+        trio.lowlevel.spawn_system_task(self._read_replies, process)
+
+    async def _read_replies(self, process):
+        buffer = b""
+        try:
+            while True:
+                chunk = await process.stdout.receive_some(1 << 20)
+                if not chunk:
+                    break
+                buffer += chunk
+                *lines, buffer = buffer.split(b"\n")
+                for line in lines:
+                    self._dispatch(line)
+        except Exception:
+            log.exception("reading from %s failed", self.command[0])
+        finally:
+            await self._exited(process)
+
+    def _dispatch(self, line):
+        if not line.strip():
+            return
+        try:
+            reply = json.loads(line)
+            waiter = self._waiting.pop(reply["id"])
+        except (ValueError, KeyError, TypeError):
+            log.warning("unexpected worker output: %r", line[:200])
+            return
+        self._answered = True
+        waiter[1] = reply
+        waiter[0].set()
+
+    async def _exited(self, process):
+        if self._process is process:
+            self._process = None
+        with trio.CancelScope(shield=True):
+            with trio.move_on_after(5):
+                await process.wait()
+            if process.returncode is None:
+                process.kill()
+        log.warning("%s exited with %s", self.command[0], process.returncode)
+        if not self._answered:
+            log.warning("%s never answered; using one-shot CLI calls from now on", self.command[0])
+            self.disabled = True
+        # Requests sent to this process get no reply; their callers fall back.
+        for request_id in list(self._waiting):
+            self._waiting.pop(request_id)[0].set()
+
+
 class Cli:
-    def __init__(self, binary="proton-drive", max_concurrent=3):
+    def __init__(self, binary="proton-drive", max_concurrent=3, worker=None):
         self.binary = binary
         # None until the first call; the bar widget shows a login button when False.
         self.logged_in = None
         self.on_login_change = None
         # Parallel CLI processes share its sqlite caches, so keep this low.
         self._limit = trio.Semaphore(max_concurrent)
+        # `worker` is a command line; the worker is one process, so this
+        # limit only bounds how much work is queued in it.
+        self._worker = Worker(worker) if worker else None
+        self._worker_limit = trio.Semaphore(16)
 
     async def _run(self, group, command, *args, options=(), on_progress=None):
         """Runs one CLI command.
@@ -127,6 +232,28 @@ class Cli:
         """
         flags = [] if on_progress else ["--json"]
         cmd = [self.binary, group, command, *flags, *options, "--", *args]
+        if not on_progress and self._worker and not self._worker.disabled:
+            try:
+                async with self._worker_limit:
+                    log.debug("asking worker %s", cmd[1:])
+                    stdout = await self._worker.call(cmd[1:])
+            except WorkerGone:
+                # It may have made the change before exiting, so only
+                # read-only commands are safe to run again.
+                if command not in ("list", "info"):
+                    raise CliError(f"worker exited during {command}") from None
+                log.warning("worker exited during %s %s; running the CLI instead", command, args)
+            except OSError as error:
+                log.warning("can't start %s (%s); using one-shot CLI calls", self._worker.command[0], error)
+                self._worker.disabled = True
+            except CliError as error:
+                log.warning("%s %s failed: %s", command, args, error)
+                if error.errno == errno.EACCES:
+                    self._set_logged_in(False)
+                raise
+            else:
+                self._set_logged_in(True)
+                return stdout
         async with self._limit:
             log.debug("running %s", cmd)
             if on_progress:

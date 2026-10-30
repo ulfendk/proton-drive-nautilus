@@ -98,7 +98,10 @@ Panel {
 
   readonly property var pending: {
     var status = root.daemon && root.daemon.status ? root.daemon.status : {}
-    return Object.keys(status).sort().map(function(path) {
+    // "local" marks a git repository kept out of the Drive; it never uploads.
+    return Object.keys(status).sort().filter(function(path) {
+      return status[path] !== "local"
+    }).map(function(path) {
       var state = status[path]
       var isError = state.indexOf("error") === 0
       return { path: path, state: isError ? "error" : state, message: isError ? state.slice(7) : "" }

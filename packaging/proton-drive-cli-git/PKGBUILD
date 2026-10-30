@@ -3,7 +3,7 @@
 _pkgname=proton-drive-cli
 pkgname=$_pkgname-git
 pkgver=0.9.0.r35.b68d64b
-pkgrel=1
+pkgrel=2
 pkgdesc='Official Proton Drive command-line client'
 arch=(x86_64 aarch64)
 url=https://github.com/protondriveapps/sdk
@@ -13,8 +13,8 @@ provides=($_pkgname)
 conflicts=($_pkgname)
 depends=('bun>=1.3.14' libsecret)
 makedepends=(git)
-source=(git+$url)
-sha256sums=('SKIP')
+source=(git+$url proton-drive-worker.ts)
+sha256sums=('SKIP' 'SKIP')
 
 pkgver() {
     cd "$srcdir"/sdk
@@ -27,11 +27,14 @@ pkgver() {
 #   makes `bun install` hang. Every package it serves is on registry.npmjs.org
 #   with the same sha512, which bun still verifies against the lockfile.
 # - The build script requires Bun exactly 1.4.2; Arch ships newer patch releases.
+# - Adds proton-drive-worker (from ../../worker): the CLI's commands served by
+#   one long-running process, which proton-drive-nautilus uses for listings.
 prepare() {
     cd "$srcdir"/sdk
     sed -i 's#https://pkg.protontech.ch/npm/npm-public/#https://registry.npmjs.org/#g' \
         incubating/account/js/bun.lock cli/bun.lock
     sed -i 's/"bun": "1\.4\.2"/"bun": ">=1.4.2"/' cli/package.json
+    cp "$srcdir"/proton-drive-worker.ts cli/src/
 }
 
 build() {
@@ -48,16 +51,24 @@ build() {
     CLI_APP_VERSION_NAME=cli-drive-archlinux \
     SENTRY_DSN="" \
     bun run build:bundle
+
+    CLI_APP_VERSION_NAME=cli-drive-archlinux \
+    SENTRY_DSN="" \
+    bun run build:bundle src/proton-drive-worker.ts
 }
 
 package() {
     cd "$srcdir"/sdk/cli
-    install -Dm644 -t "$pkgdir"/usr/lib/$_pkgname release/proton-drive.js
+    install -Dm644 -t "$pkgdir"/usr/lib/$_pkgname release/proton-drive.js release/proton-drive-worker.js
     cat > ${_pkgname%-cli} << 'EOF'
 #!/bin/sh
 exec bun /usr/lib/proton-drive-cli/proton-drive.js "$@"
 EOF
-    install -Dm755 -t "$pkgdir"/usr/bin ${_pkgname%-cli}
+    cat > ${_pkgname%-cli}-worker << 'EOF'
+#!/bin/sh
+exec bun /usr/lib/proton-drive-cli/proton-drive-worker.js "$@"
+EOF
+    install -Dm755 -t "$pkgdir"/usr/bin ${_pkgname%-cli} ${_pkgname%-cli}-worker
     install -Dm644 -t "$pkgdir"/usr/share/licenses/$_pkgname ../LICENSE.md
     install -Dm644 -t "$pkgdir"/usr/share/doc/$_pkgname CHANGELOG.md README.md
 

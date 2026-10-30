@@ -1,0 +1,1 @@
+../../worker/proton-drive-worker.ts

@@ -23,6 +23,9 @@ Proton's trash.
   Proton's version history is kept.
 - **Nothing lost by accident.** Deleting moves the item to Proton's trash,
   where you can restore it.
+- **Git repositories stay off the Drive.** A folder copied in with a `.git`
+  inside is kept on your disk instead of being uploaded. It still shows up and
+  works in `~/ProtonDrive`, marked with an emblem.
 - **Nautilus integration.** Emblems on files that are still uploading or
   failed, "Retry Upload" on failed files, and "Upload to Proton Drive" on any
   local file. `~/ProtonDrive` is bookmarked in the sidebar.
@@ -67,7 +70,7 @@ cd packaging/proton-drive-cli-git
 makepkg -si
 ```
 
-The patch makes two changes:
+The patch makes three changes:
 
 - **Registry:** it downloads dependencies from the public npm registry instead
   of `pkg.protontech.ch`. That server doesn't accept connections from every
@@ -75,8 +78,15 @@ The patch makes two changes:
   byte-for-byte the same, and bun checks each one against the lockfile's
   checksum.
 - **Bun version:** it accepts any Bun from 1.4.2 up, instead of exactly 1.4.2.
+- **Worker:** it also builds `proton-drive-worker` from
+  [worker/](worker/proton-drive-worker.ts): the CLI's own commands, served by
+  one long-running process. The CLI signs in and decrypts your keys every time
+  it starts, which makes each folder listing take a few seconds. The worker
+  does that once, and then lists a folder in a fraction of a second.
 
 The unpatched AUR package may work for you as is: `yay -S proton-drive-cli-git`.
+Without the worker, the mount runs the CLI for every call, so browsing is
+slower.
 On other distributions, download the CLI from
 [proton.me/download/drive/cli](https://proton.me/download/drive/cli/index.html).
 
@@ -117,8 +127,15 @@ Run it again to update.
 | Rename or move | `filesystem rename` / `filesystem move` |
 | Delete | `filesystem trash` |
 
+Everything except transfers goes to `proton-drive-worker` when it's installed.
+Uploads and downloads always run `proton-drive`, because the CLI only reports
+their progress on a terminal. If the worker exits, the mount starts it again
+on the next call; if it can't start or never answers, the mount runs the CLI
+for every call instead. Start the mount with `--worker ''` to do that from the
+start.
+
 [docs/cli-reference.md](docs/cli-reference.md) lists the CLI commands and JSON
-fields the mount relies on.
+fields the mount relies on, and the worker's protocol.
 
 ### Good to know
 
@@ -127,6 +144,16 @@ fields the mount relies on.
   item to Proton's trash, so you can still restore it.
 - **Closing a file doesn't mean it's uploaded.** Watch the emblem or the bar
   widget. When the service stops, it waits up to 60 s for uploads to finish.
+- **New folders upload once the copy pauses.** A folder and everything in it
+  is held back until nothing has been copied into new folders for 3 s
+  (`--quiet-seconds`). That way a repository's `.git`, which can be copied
+  last, is seen before any of its files are uploaded.
+- **Git repositories are kept in `~/.local/share/proton-drive-nautilus/local`**
+  (`--local-dir`), at their path in the mount, and survive restarts. Moving
+  files into or out of one copies them. If you run `git init` in a folder
+  that's already on the Drive, only its `.git` is kept local; its files keep
+  syncing. Start the mount with `--upload-git-repos` to upload repositories
+  like any other folder.
 - **Changes made elsewhere show up on the next look.** A folder older than 5 s
   is refreshed in the background when you open it, so pressing F5 in Nautilus
   shows the result.
@@ -170,8 +197,10 @@ python -m venv --system-site-packages .venv
 
 The tests mount the real filesystem, backed by
 [tests/fake_proton_drive.py](tests/fake_proton_drive.py), a stand-in for the
-CLI that keeps files in a local folder. They need `/dev/fuse`, but not a
-Proton account.
+CLI that keeps files in a local folder, and
+[tests/fake_proton_drive_worker.py](tests/fake_proton_drive_worker.py), which
+serves it over the worker's protocol. They need `/dev/fuse`, but not a Proton
+account.
 
 To run the mount in the foreground against your own Drive:
 
@@ -186,6 +215,7 @@ systemctl --user stop proton-drive-fs
 | `nautilus/` | the Nautilus extension |
 | `omarchy/regin.proton-drive/` | the Omarchy bar widget |
 | `systemd/` | the user service |
+| `worker/` | `proton-drive-worker`, built by the PKGBUILD from the CLI's source |
 | `packaging/` | the patched CLI PKGBUILD |
 
 ## Disclaimer

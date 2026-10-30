@@ -3,6 +3,7 @@
 import argparse
 import logging
 import os
+import shutil
 import signal
 
 import pyfuse3
@@ -17,10 +18,16 @@ log = logging.getLogger("protondrivefs")
 
 def parse_args():
     cache_home = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
+    data_home = os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
     parser = argparse.ArgumentParser(prog="protondrivefs", description=__doc__)
     parser.add_argument("mountpoint", nargs="?", default=os.path.expanduser("~/ProtonDrive"))
     parser.add_argument("--cli", default="proton-drive", help="proton-drive executable")
+    parser.add_argument(
+        "--worker",
+        default="proton-drive-worker",
+        help="long-running CLI for listings and other metadata calls; '' to run the CLI for every call",
+    )
     parser.add_argument("--cache-dir", default=os.path.join(cache_home, "proton-drive-nautilus"))
     parser.add_argument("--state-dir", default=os.path.join(runtime_dir, "proton-drive-nautilus"))
     parser.add_argument("--list-ttl", type=float, default=30.0, help="seconds a folder listing is reused")
@@ -34,6 +41,22 @@ def parse_args():
         "--hide-from-indexers",
         action="store_true",
         help="show a virtual .trackerignore in the root so LocalSearch doesn't index the Drive at all",
+    )
+    parser.add_argument(
+        "--local-dir",
+        default=os.path.join(data_home, "proton-drive-nautilus", "local"),
+        help="where git repositories copied into the mount are kept instead of uploading them",
+    )
+    parser.add_argument(
+        "--upload-git-repos",
+        action="store_true",
+        help="upload git repositories like any other folder",
+    )
+    parser.add_argument(
+        "--quiet-seconds",
+        type=float,
+        default=3.0,
+        help="how long copying into new folders must pause before they upload",
     )
     parser.add_argument("--debug", action="store_true")
     return parser.parse_args()
@@ -61,13 +84,19 @@ def main():
     os.makedirs(args.mountpoint, exist_ok=True)
     os.makedirs(args.state_dir, exist_ok=True)
 
+    worker = shutil.which(args.worker) if args.worker else None
+    if args.worker and not worker:
+        log.info("%s not found; running the CLI for every call", args.worker)
     drive = Drive(
-        Cli(args.cli),
+        Cli(args.cli, worker=[worker] if worker else None),
         args.cache_dir,
         list_ttl=args.list_ttl,
         cache_limit=int(args.cache_limit_gb * 1024**3),
         status_file=os.path.join(args.state_dir, "status.json"),
         hide_from_indexers=args.hide_from_indexers,
+        local_dir=args.local_dir,
+        keep_git_repos_local=not args.upload_git_repos,
+        quiet_seconds=args.quiet_seconds,
     )
     options = set(pyfuse3.default_options)
     options.add("fsname=protondrive")
